@@ -1,0 +1,55 @@
+name: Verify Reviews
+
+on:
+  pull_request:
+    branches: [local, staging, main]
+
+permissions:
+  checks: read
+
+jobs:
+  verify-reviews:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify Cursor Bugbot and Greptile Review
+        uses: actions/github-script@v7
+        with:
+          script: |
+            async function waitForCheck(name, maxMinutes = 15) {
+              const delayMs = 10000;
+              const maxAttempts = Math.ceil((maxMinutes * 60 * 1000) / delayMs);
+              const sha = context.payload.pull_request.head.sha;
+
+              for (let i = 0; i < maxAttempts; i++) {
+                const { data: { check_runs } } = await github.rest.checks.listForRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: sha,
+                  check_name: name,
+                });
+
+                const run = check_runs.find(r => r.name === name);
+                if (run && run.status === 'completed') {
+                  if (run.conclusion === 'success') {
+                    console.log(`✅ ${name} passed`);
+                    return;
+                  }
+                  throw new Error(`${name} concluded with '${run.conclusion}' (must be 'success')`);
+                }
+
+                console.log(`⏳ [${i + 1}/${maxAttempts}] Waiting for ${name}...`);
+                await new Promise(r => setTimeout(r, delayMs));
+              }
+
+              throw new Error(`Timeout: ${name} did not complete within ${maxMinutes} minutes`);
+            }
+
+            const results = await Promise.allSettled([
+              waitForCheck('Cursor Bugbot'),
+              waitForCheck('Greptile Review'),
+            ]);
+
+            const failures = results.filter(r => r.status === 'rejected');
+            if (failures.length > 0) {
+              core.setFailed(failures.map(f => f.reason.message).join('\n'));
+            }

@@ -1,6 +1,6 @@
 {
   "name": "Verify Reviews",
-  "description": "Polls for Cursor Bugbot and Greptile Review check runs, verifies both conclude with success. Required by org rulesets.",
+  "description": "Required by org rulesets for project repos. NOT for infra repos (pai-org-infra, simplemeter-infra, pai-terraform-modules, pai-infra-instructions).",
   "iconName": "shield-check",
   "categories": ["continuous-integration"]
 }

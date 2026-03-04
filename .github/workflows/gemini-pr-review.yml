@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   gemini-review:
-    if: ${{ github.event.pull_request.draft == false && secrets.GEMINI_API_KEY != '' }}
+    if: ${{ github.event.pull_request.draft == false && github.event.pull_request.head.repo.fork == false }}
     runs-on: ubuntu-latest
     timeout-minutes: 7
     steps:

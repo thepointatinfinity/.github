@@ -1,0 +1,220 @@
+name: Merge and Review Gate Reusable
+
+on:
+  workflow_call:
+
+jobs:
+  merge-review-gate:
+    name: Merge and Review Gate
+    runs-on: ubuntu-latest
+    permissions:
+      checks: read
+      contents: read
+      issues: read
+      pull-requests: read
+      statuses: read
+    steps:
+      - name: Enforce merge and review gates
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${PR_NUMBER:-}" || -z "${HEAD_SHA:-}" ]]; then
+            echo "No pull request context is available; skipping merge gate."
+            exit 0
+          fi
+
+          if ! command -v gh >/dev/null 2>&1; then
+            echo "gh CLI is required in runner image." >&2
+            exit 1
+          fi
+
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "jq is required in runner image." >&2
+            exit 1
+          fi
+
+          declare -a FAILURES
+          SELF_CHECK_REGEX='merge and review gate|workflow gate|merge-review-gate|workflow\.yml'
+
+          add_failure() {
+            local message="$1"
+            FAILURES+=("$message")
+            echo "::error::$message"
+          }
+
+          decode_base64() {
+            base64 --decode 2>/dev/null || true
+          }
+
+          policy_content=""
+          for policy_path in claude.md CLAUDE.md .claude/CLAUDE.md; do
+            encoded="$(gh api "repos/${OWNER}/${REPO}/contents/${policy_path}" --jq '.content // empty' 2>/dev/null || true)"
+            if [[ -n "$encoded" ]]; then
+              policy_content="$(printf '%s' "$encoded" | tr -d '\n' | decode_base64)"
+              if [[ -n "$policy_content" ]]; then
+                break
+              fi
+            fi
+          done
+
+          policy_has() {
+            local pattern="$1"
+            printf '%s' "$policy_content" | grep -Eiq "$pattern"
+          }
+
+          fetch_check_runs() {
+            gh api "repos/${OWNER}/${REPO}/commits/${HEAD_SHA}/check-runs?per_page=100"
+          }
+
+          echo "Waiting for check runs to finish on ${HEAD_SHA}..."
+          check_runs_json=""
+          for _ in $(seq 1 40); do
+            check_runs_json="$(fetch_check_runs)"
+            pending_count="$(printf '%s' "$check_runs_json" | jq --arg re "$SELF_CHECK_REGEX" '[.check_runs[] | select((.name | test($re; "i")) | not) | select(.status != "completed")] | length')"
+            if [[ "$pending_count" == "0" ]]; then
+              break
+            fi
+            sleep 15
+          done
+
+          pending_after_wait="$(printf '%s' "$check_runs_json" | jq --arg re "$SELF_CHECK_REGEX" '[.check_runs[] | select((.name | test($re; "i")) | not) | select(.status != "completed") | .name] | unique')"
+          if [[ "$(printf '%s' "$pending_after_wait" | jq 'length')" != "0" ]]; then
+            add_failure "Some check runs are still pending after timeout: $(printf '%s' "$pending_after_wait" | jq -r 'join(", ")')"
+          fi
+
+          statuses_json="$(gh api "repos/${OWNER}/${REPO}/commits/${HEAD_SHA}/status")"
+
+          required_contexts="$(
+            gh api "repos/${OWNER}/${REPO}/rulesets?per_page=100" --jq '.[] | select(.enforcement=="active" and .target=="branch") | .id' | \
+            while IFS= read -r ruleset_id; do
+              [[ -z "$ruleset_id" ]] && continue
+              gh api "repos/${OWNER}/${REPO}/rulesets/${ruleset_id}" --jq '.rules[]? | select(.type=="required_status_checks") | .parameters.required_status_checks[]?.context'
+            done | sed '/^$/d' | sort -u
+          )"
+
+          if [[ -n "$required_contexts" ]]; then
+            echo "Validating branch-protection required checks..."
+            while IFS= read -r context; do
+              [[ -z "$context" ]] && continue
+
+              conclusion="$(printf '%s' "$check_runs_json" | jq -r --arg context "$context" '[.check_runs[] | select(.name == $context) | .conclusion][-1] // empty')"
+              if [[ -z "$conclusion" ]]; then
+                state="$(printf '%s' "$statuses_json" | jq -r --arg context "$context" '[.statuses[]? | select(.context == $context) | .state][-1] // empty')"
+                if [[ "$state" != "success" ]]; then
+                  add_failure "Required check '${context}' is missing or not successful."
+                fi
+              elif [[ "$conclusion" != "success" ]]; then
+                add_failure "Required check '${context}' concluded '${conclusion}', expected 'success'."
+              fi
+            done <<< "$required_contexts"
+          fi
+
+          echo "Validating GitHub Actions CI checks..."
+          gha_failures="$(printf '%s' "$check_runs_json" | jq -r --arg re "$SELF_CHECK_REGEX" '.check_runs[] | select(.app.slug == "github-actions") | select((.name | test($re; "i")) | not) | select(.conclusion != "success" and .conclusion != "skipped") | "\(.name):\(.conclusion // .status)"')"
+          if [[ -n "$gha_failures" ]]; then
+            while IFS= read -r line; do
+              [[ -z "$line" ]] && continue
+              add_failure "CI check failed: ${line}"
+            done <<< "$gha_failures"
+          fi
+
+          is_claude_configured=false
+          if policy_has 'claude-review / Claude Review|Claude review'; then
+            is_claude_configured=true
+          elif printf '%s' "$check_runs_json" | jq -e '.check_runs[] | select(.name | test("claude review|claude-review"; "i"))' >/dev/null; then
+            is_claude_configured=true
+          fi
+
+          if [[ "$is_claude_configured" == "true" ]]; then
+            claude_conclusion="$(printf '%s' "$check_runs_json" | jq -r '[.check_runs[] | select(.name == "claude-review / Claude Review" or (.name | test("claude review"; "i")))] | last | .conclusion // empty')"
+            if [[ "$claude_conclusion" != "success" ]]; then
+              add_failure "Claude review check is configured but not successful on latest commit."
+            fi
+          fi
+
+          is_bugbot_configured=false
+          if policy_has 'BugBot'; then
+            is_bugbot_configured=true
+          elif printf '%s' "$check_runs_json" | jq -e '.check_runs[] | select(.name | test("bugbot"; "i"))' >/dev/null; then
+            is_bugbot_configured=true
+          fi
+
+          if [[ "$is_bugbot_configured" == "true" ]]; then
+            bugbot_conclusion="$(printf '%s' "$check_runs_json" | jq -r '[.check_runs[] | select(.name | test("bugbot"; "i"))] | last | .conclusion // empty')"
+            if [[ "$bugbot_conclusion" != "success" ]]; then
+              add_failure "BugBot is configured and must conclude 'success' (not neutral/failure)."
+            fi
+          fi
+
+          is_greptile_configured=false
+          if policy_has 'Greptile'; then
+            is_greptile_configured=true
+          elif printf '%s' "$check_runs_json" | jq -e '.check_runs[] | select(.name | test("greptile"; "i"))' >/dev/null; then
+            is_greptile_configured=true
+          fi
+
+          if [[ "$is_greptile_configured" == "true" ]]; then
+            greptile_conclusion="$(printf '%s' "$check_runs_json" | jq -r '[.check_runs[] | select(.name | test("greptile"; "i"))] | last | .conclusion // empty')"
+            if [[ "$greptile_conclusion" != "success" ]]; then
+              add_failure "Greptile is configured and must conclude 'success'."
+            fi
+
+            issue_comments_json="$(gh api "repos/${OWNER}/${REPO}/issues/${PR_NUMBER}/comments?per_page=100" --paginate 2>/dev/null || echo '[]')"
+            review_comments_json="$(gh api "repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}/comments?per_page=100" --paginate 2>/dev/null || echo '[]')"
+            greptile_comment_body="$(jq -r -s 'add | [.[] | select((.user.login // "" | ascii_downcase | contains("greptile")))][-1].body // empty' <(printf '%s' "$issue_comments_json") <(printf '%s' "$review_comments_json"))"
+            if [[ -z "$greptile_comment_body" ]]; then
+              add_failure "Greptile is configured but no Greptile comment was found to verify 5/5 confidence."
+            elif ! printf '%s' "$greptile_comment_body" | grep -Eq '5\s*/\s*5'; then
+              add_failure "Greptile is configured but latest Greptile comment does not show 5/5 confidence."
+            fi
+          fi
+
+          is_codex_configured=false
+          if policy_has 'Codex.*review|@codex review'; then
+            is_codex_configured=true
+          fi
+
+          if [[ "$is_codex_configured" == "true" ]]; then
+            reviews_json="$(gh api "repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}/reviews?per_page=100" --paginate 2>/dev/null || echo '[]')"
+            codex_reviews_on_head="$(printf '%s' "$reviews_json" | jq --arg sha "$HEAD_SHA" '[.[] | select(((.user.login // "" | ascii_downcase | contains("codex")) or .user.login == "chatgpt-codex-connector[bot]") and .commit_id == $sha)]')"
+            codex_count="$(printf '%s' "$codex_reviews_on_head" | jq 'length')"
+
+            if [[ "$codex_count" == "0" ]]; then
+              add_failure "Codex review is configured but no Codex review exists for the latest PR head commit."
+            else
+              codex_state="$(printf '%s' "$codex_reviews_on_head" | jq -r 'last.state // empty')"
+              codex_body="$(printf '%s' "$codex_reviews_on_head" | jq -r 'last.body // empty')"
+              if [[ "$codex_state" != "APPROVED" ]] && ! printf '%s' "$codex_body" | grep -Eiq 'lgtm|no findings|no issues|looks good|approved'; then
+                add_failure "Codex review exists on latest commit but is missing LGTM-or-equivalent conclusion text/state."
+              fi
+            fi
+          fi
+
+          unresolved_threads="$(gh api graphql -f owner="$OWNER" -f repo="$REPO" -F number="$PR_NUMBER" -f query='query($owner: String!, $repo: String!, $number: Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes { isResolved } } } } }' --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length' 2>/dev/null || echo '0')"
+          if [[ "$unresolved_threads" != "0" ]]; then
+            add_failure "There are unresolved review threads (${unresolved_threads}) on the pull request."
+          fi
+
+          mergeable_state="$(gh api "repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}" --jq '.mergeable_state // "unknown"' 2>/dev/null || echo 'unknown')"
+          if [[ "$mergeable_state" == "dirty" ]]; then
+            add_failure "PR has merge conflicts (mergeable_state=dirty)."
+          fi
+          if [[ "$mergeable_state" == "behind" ]]; then
+            add_failure "PR is behind target branch and must be rebased on latest remote commit."
+          fi
+
+          if (( ${#FAILURES[@]} > 0 )); then
+            echo
+            echo "Merge and review gate failed with ${#FAILURES[@]} issue(s)."
+            exit 1
+          fi
+
+          echo "Merge and review gate passed."

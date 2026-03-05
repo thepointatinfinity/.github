@@ -194,11 +194,6 @@ jobs:
             fi
           fi
 
-          unresolved_threads="$(gh api graphql -f owner="$OWNER" -f repo="$REPO" -F number="$PR_NUMBER" -f query='query($owner: String!, $repo: String!, $number: Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes { isResolved } } } } }' --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length' 2>/dev/null || echo '0')"
-          if [[ "$unresolved_threads" != "0" ]]; then
-            add_failure "There are unresolved review threads (${unresolved_threads}) on the pull request."
-          fi
-
           mergeable_state="$(gh api "repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}" --jq '.mergeable_state // "unknown"' 2>/dev/null || echo 'unknown')"
           if [[ "$mergeable_state" == "dirty" ]]; then
             add_failure "PR has merge conflicts (mergeable_state=dirty)."

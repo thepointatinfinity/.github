@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   gemini-review:
-    if: ${{ github.event.pull_request.draft == false && github.event.pull_request.head.repo.fork == false }}
+    if: ${{ github.event.pull_request.draft == false && github.event.pull_request.head.repo.fork == false && secrets.GCP_WORKLOAD_IDENTITY_PROVIDER != '' && (secrets.GCP_PLAN_SERVICE_ACCOUNT != '' || secrets.GCP_SERVICE_ACCOUNT != '') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -43,6 +43,7 @@ jobs:
             "gemini-3-flash-preview"
             "gemini-2.5-flash-lite"
           )
+          probe_files=()
 
           if [[ "${GCP_LOCATION}" == "global" ]]; then
             host="aiplatform.googleapis.com"
@@ -51,9 +52,12 @@ jobs:
           fi
 
           for m in "${candidates[@]}"; do
+            safe_model="${m//[^a-zA-Z0-9._-]/_}"
+            probe_file="/tmp/model_probe_${safe_model}.json"
+            probe_files+=("${probe_file}")
             url="https://${host}/v1/projects/${GCP_PROJECT_ID}/locations/${GCP_LOCATION}/publishers/google/models/${m}:generateContent"
             code="$(
-              curl -sS -o /tmp/model_probe.json -w "%{http_code}" \
+              curl -sS -o "${probe_file}" -w "%{http_code}" \
                 -H "Authorization: Bearer ${ACCESS_TOKEN}" \
                 -H "Content-Type: application/json" \
                 -d '{"contents":[{"role":"user","parts":[{"text":"ping"}]}]}' \
@@ -66,11 +70,14 @@ jobs:
               exit 0
             fi
 
-            echo "Model unavailable: ${m} (HTTP ${code})"
+            echo "Model unavailable: ${m} (HTTP ${code}); details in ${probe_file}"
           done
 
           echo "No candidate Gemini model is available in Vertex for ${GCP_PROJECT_ID}/${GCP_LOCATION}."
-          cat /tmp/model_probe.json || true
+          for f in "${probe_files[@]}"; do
+            echo "--- ${f} ---"
+            cat "${f}" || true
+          done
           exit 1
 
       - name: Run Gemini pull request review

@@ -14,10 +14,64 @@ jobs:
   gemini-review:
     if: ${{ github.event.pull_request.draft == false && github.event.pull_request.head.repo.fork == false }}
     runs-on: ubuntu-latest
-    timeout-minutes: 7
+    timeout-minutes: 15
+    env:
+      GCP_PROJECT_ID: pai-infrastructure
+      GCP_LOCATION: global
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Authenticate to GCP (WIF)
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_PLAN_SERVICE_ACCOUNT || secrets.GCP_SERVICE_ACCOUNT }}
+          token_format: access_token
+
+      - name: Resolve Gemini model fallback
+        id: model
+        shell: bash
+        env:
+          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+        run: |
+          set -euo pipefail
+
+          candidates=(
+            "gemini-3.1-flash-lite-preview"
+            "gemini-3-flash-preview"
+            "gemini-2.5-flash-lite"
+          )
+
+          if [[ "${GCP_LOCATION}" == "global" ]]; then
+            host="aiplatform.googleapis.com"
+          else
+            host="${GCP_LOCATION}-aiplatform.googleapis.com"
+          fi
+
+          for m in "${candidates[@]}"; do
+            url="https://${host}/v1/projects/${GCP_PROJECT_ID}/locations/${GCP_LOCATION}/publishers/google/models/${m}:generateContent"
+            code="$(
+              curl -sS -o /tmp/model_probe.json -w "%{http_code}" \
+                -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+                -H "Content-Type: application/json" \
+                -d '{"contents":[{"role":"user","parts":[{"text":"ping"}]}]}' \
+                "${url}"
+            )"
+
+            if [[ "${code}" == "200" ]]; then
+              echo "model=${m}" >> "$GITHUB_OUTPUT"
+              echo "Selected model: ${m}"
+              exit 0
+            fi
+
+            echo "Model unavailable: ${m} (HTTP ${code})"
+          done
+
+          echo "No candidate Gemini model is available in Vertex for ${GCP_PROJECT_ID}/${GCP_LOCATION}."
+          cat /tmp/model_probe.json || true
+          exit 1
 
       - name: Run Gemini pull request review
         uses: google-github-actions/run-gemini-cli@v0
@@ -28,7 +82,12 @@ jobs:
           PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
           REPOSITORY: ${{ github.repository }}
         with:
-          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          gcp_project_id: ${{ env.GCP_PROJECT_ID }}
+          gcp_location: ${{ env.GCP_LOCATION }}
+          gcp_workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          gcp_service_account: ${{ secrets.GCP_PLAN_SERVICE_ACCOUNT || secrets.GCP_SERVICE_ACCOUNT }}
+          use_vertex_ai: "true"
+          gemini_model: ${{ steps.model.outputs.model }}
           workflow_name: gemini-review
           settings: |-
             {

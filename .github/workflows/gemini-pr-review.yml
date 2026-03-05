@@ -19,7 +19,24 @@ jobs:
       GCP_PROJECT_ID: pai-infrastructure
       GCP_LOCATION: global
     steps:
+      - name: Validate Gemini prerequisites
+        id: prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready=true
+          if [ -z "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}" ]; then
+            echo "Skipping Gemini review: missing GCP_WORKLOAD_IDENTITY_PROVIDER."
+            ready=false
+          fi
+          if [ -z "${{ secrets.GCP_PLAN_SERVICE_ACCOUNT }}" ] && [ -z "${{ secrets.GCP_SERVICE_ACCOUNT }}" ]; then
+            echo "Skipping Gemini review: missing GCP_PLAN_SERVICE_ACCOUNT and GCP_SERVICE_ACCOUNT."
+            ready=false
+          fi
+          echo "ready=${ready}" >> "$GITHUB_OUTPUT"
+
       - name: Checkout repository
+        if: ${{ steps.prerequisites.outputs.ready == 'true' }}
         uses: actions/checkout@v4
 
       - name: Verify Vertex secrets are available

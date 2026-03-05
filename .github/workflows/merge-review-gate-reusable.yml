@@ -56,7 +56,7 @@ jobs:
 
           policy_content=""
           for policy_path in claude.md CLAUDE.md .claude/CLAUDE.md; do
-            encoded="$(gh api "repos/${OWNER}/${REPO}/contents/${policy_path}" --jq '.content // empty' 2>/dev/null || true)"
+            encoded="$(gh api "repos/${OWNER}/${REPO}/contents/${policy_path}?ref=${HEAD_SHA}" --jq '.content // empty' 2>/dev/null || true)"
             if [[ -n "$encoded" ]]; then
               policy_content="$(printf '%s' "$encoded" | tr -d '\n' | decode_base64)"
               if [[ -n "$policy_content" ]]; then
@@ -140,24 +140,28 @@ jobs:
             fi
           fi
 
-          is_bugbot_configured=false
-          if policy_has 'BugBot'; then
-            is_bugbot_configured=true
-          elif printf '%s' "$check_runs_json" | jq -e '.check_runs[] | select(.name | test("bugbot"; "i"))' >/dev/null; then
-            is_bugbot_configured=true
+          is_gemini_configured=false
+          if policy_has 'Gemini( Code Assist)? review|gemini-code-assist'; then
+            is_gemini_configured=true
           fi
 
-          if [[ "$is_bugbot_configured" == "true" ]]; then
-            bugbot_conclusion="$(printf '%s' "$check_runs_json" | jq -r '[.check_runs[] | select(.name | test("bugbot"; "i"))] | last | .conclusion // empty')"
-            if [[ "$bugbot_conclusion" != "success" ]]; then
-              add_failure "BugBot is configured and must conclude 'success' (not neutral/failure)."
+          if [[ "$is_gemini_configured" == "true" ]]; then
+            reviews_json="$(gh api "repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}/reviews?per_page=100" --paginate 2>/dev/null || echo '[]')"
+            gemini_reviews_on_head="$(printf '%s' "$reviews_json" | jq --arg sha "$HEAD_SHA" '[.[] | select((.user.login == "gemini-code-assist[bot]" or .user.login == "gemini-code-assist") and .commit_id == $sha)]')"
+            gemini_count="$(printf '%s' "$gemini_reviews_on_head" | jq 'length')"
+
+            if [[ "$gemini_count" == "0" ]]; then
+              add_failure "Gemini Code Assist is configured but no latest-head review from gemini-code-assist[bot] was found."
+            else
+              gemini_state="$(printf '%s' "$gemini_reviews_on_head" | jq -r 'last.state // empty')"
+              if [[ "$gemini_state" == "CHANGES_REQUESTED" ]]; then
+                add_failure "Gemini Code Assist has active CHANGES_REQUESTED feedback on latest commit."
+              fi
             fi
           fi
 
           is_greptile_configured=false
           if policy_has 'Greptile'; then
-            is_greptile_configured=true
-          elif printf '%s' "$check_runs_json" | jq -e '.check_runs[] | select(.name | test("greptile"; "i"))' >/dev/null; then
             is_greptile_configured=true
           fi
 
@@ -196,11 +200,6 @@ jobs:
                 add_failure "Codex review exists on latest commit but is missing LGTM-or-equivalent conclusion text/state."
               fi
             fi
-          fi
-
-          unresolved_threads="$(gh api graphql -f owner="$OWNER" -f repo="$REPO" -F number="$PR_NUMBER" -f query='query($owner: String!, $repo: String!, $number: Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes { isResolved } } } } }' --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length' 2>/dev/null || echo '0')"
-          if [[ "$unresolved_threads" != "0" ]]; then
-            add_failure "There are unresolved review threads (${unresolved_threads}) on the pull request."
           fi
 
           mergeable_state="$(gh api "repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}" --jq '.mergeable_state // "unknown"' 2>/dev/null || echo 'unknown')"

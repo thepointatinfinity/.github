@@ -24,6 +24,9 @@ jobs:
         run: |
           set -euo pipefail
           missing=()
+          if [ -z "${{ secrets.GEMINI_REVIEW_BOT_TOKEN }}" ]; then
+            missing+=("GEMINI_REVIEW_BOT_TOKEN")
+          fi
           if [ -z "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}" ]; then
             missing+=("GCP_WORKLOAD_IDENTITY_PROVIDER")
           fi
@@ -101,9 +104,8 @@ jobs:
       - name: Run Gemini pull request review
         uses: google-github-actions/run-gemini-cli@v0.1.21
         env:
-          # Prefer dedicated Gemini reviewer PAT; fallback to existing org PAT.
-          # Final fallback keeps behavior working with default Actions identity.
-          GITHUB_TOKEN: ${{ secrets.GEMINI_REVIEW_BOT_TOKEN || secrets.CLAUDE_CODE_OAUTH_TOKEN || github.token }}
+          # Dedicated machine-user PAT so reviews are authored by Gemini Review Bot.
+          GITHUB_TOKEN: ${{ secrets.GEMINI_REVIEW_BOT_TOKEN }}
           ISSUE_TITLE: ${{ github.event.pull_request.title }}
           ISSUE_BODY: ${{ github.event.pull_request.body }}
           PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}

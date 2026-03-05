@@ -101,7 +101,9 @@ jobs:
       - name: Run Gemini pull request review
         uses: google-github-actions/run-gemini-cli@v0.1.21
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          # Prefer dedicated Gemini reviewer PAT; fallback to existing org PAT.
+          # Final fallback keeps behavior working with default Actions identity.
+          GITHUB_TOKEN: ${{ secrets.GEMINI_REVIEW_BOT_TOKEN || secrets.CLAUDE_CODE_OAUTH_TOKEN || github.token }}
           ISSUE_TITLE: ${{ github.event.pull_request.title }}
           ISSUE_BODY: ${{ github.event.pull_request.body }}
           PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}

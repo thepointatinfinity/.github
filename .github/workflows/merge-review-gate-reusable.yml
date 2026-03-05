@@ -143,8 +143,6 @@ jobs:
           is_bugbot_configured=false
           if policy_has 'BugBot'; then
             is_bugbot_configured=true
-          elif printf '%s' "$check_runs_json" | jq -e '.check_runs[] | select(.name | test("bugbot"; "i"))' >/dev/null; then
-            is_bugbot_configured=true
           fi
 
           if [[ "$is_bugbot_configured" == "true" ]]; then
@@ -156,8 +154,6 @@ jobs:
 
           is_greptile_configured=false
           if policy_has 'Greptile'; then
-            is_greptile_configured=true
-          elif printf '%s' "$check_runs_json" | jq -e '.check_runs[] | select(.name | test("greptile"; "i"))' >/dev/null; then
             is_greptile_configured=true
           fi
 

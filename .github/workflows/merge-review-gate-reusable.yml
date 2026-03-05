@@ -140,15 +140,23 @@ jobs:
             fi
           fi
 
-          is_bugbot_configured=false
-          if policy_has 'BugBot'; then
-            is_bugbot_configured=true
+          is_gemini_configured=false
+          if policy_has 'Gemini( Code Assist)? review|gemini-code-assist'; then
+            is_gemini_configured=true
           fi
 
-          if [[ "$is_bugbot_configured" == "true" ]]; then
-            bugbot_conclusion="$(printf '%s' "$check_runs_json" | jq -r '[.check_runs[] | select(.name | test("bugbot"; "i"))] | last | .conclusion // empty')"
-            if [[ "$bugbot_conclusion" != "success" ]]; then
-              add_failure "BugBot is configured and must conclude 'success' (not neutral/failure)."
+          if [[ "$is_gemini_configured" == "true" ]]; then
+            reviews_json="$(gh api "repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}/reviews?per_page=100" --paginate 2>/dev/null || echo '[]')"
+            gemini_reviews_on_head="$(printf '%s' "$reviews_json" | jq --arg sha "$HEAD_SHA" '[.[] | select((.user.login == "gemini-code-assist[bot]" or .user.login == "gemini-code-assist") and .commit_id == $sha)]')"
+            gemini_count="$(printf '%s' "$gemini_reviews_on_head" | jq 'length')"
+
+            if [[ "$gemini_count" == "0" ]]; then
+              add_failure "Gemini Code Assist is configured but no latest-head review from gemini-code-assist[bot] was found."
+            else
+              gemini_state="$(printf '%s' "$gemini_reviews_on_head" | jq -r 'last.state // empty')"
+              if [[ "$gemini_state" == "CHANGES_REQUESTED" ]]; then
+                add_failure "Gemini Code Assist has active CHANGES_REQUESTED feedback on latest commit."
+              fi
             fi
           fi
 

@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   gemini-review:
-    if: ${{ github.event.pull_request.draft == false && github.event.pull_request.head.repo.fork == false && secrets.GCP_WORKLOAD_IDENTITY_PROVIDER != '' && (secrets.GCP_PLAN_SERVICE_ACCOUNT != '' || secrets.GCP_SERVICE_ACCOUNT != '') }}
+    if: ${{ github.event.pull_request.draft == false && github.event.pull_request.head.repo.fork == false }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -22,7 +22,23 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Verify Vertex secrets are available
+        id: preflight
+        shell: bash
+        env:
+          GCP_WIF_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_PLAN_SERVICE_ACCOUNT || secrets.GCP_SERVICE_ACCOUNT }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GCP_WIF_PROVIDER}" || -z "${GCP_SERVICE_ACCOUNT}" ]]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "Vertex secrets are unavailable in this context; skipping Gemini review."
+            exit 0
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
       - name: Authenticate to GCP (WIF)
+        if: steps.preflight.outputs.ready == 'true'
         id: auth
         uses: google-github-actions/auth@v2
         with:
@@ -31,6 +47,7 @@ jobs:
           token_format: access_token
 
       - name: Resolve Gemini model fallback
+        if: steps.preflight.outputs.ready == 'true'
         id: model
         shell: bash
         env:
@@ -81,7 +98,8 @@ jobs:
           exit 1
 
       - name: Run Gemini pull request review
-        uses: google-github-actions/run-gemini-cli@v0
+        if: steps.preflight.outputs.ready == 'true'
+        uses: google-github-actions/run-gemini-cli@v0.1.21
         env:
           GITHUB_TOKEN: ${{ github.token }}
           ISSUE_TITLE: ${{ github.event.pull_request.title }}
@@ -133,3 +151,7 @@ jobs:
               }
             }
           prompt: /gemini-review
+
+      - name: Skip Gemini review (missing secrets)
+        if: steps.preflight.outputs.ready != 'true'
+        run: echo "Skipping Gemini review because required Vertex secrets are not available."

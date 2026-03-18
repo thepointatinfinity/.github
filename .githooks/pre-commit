@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+STAGED_FILES=()
+while IFS= read -r -d '' staged_file; do
+  STAGED_FILES+=("$staged_file")
+done < <(git diff --cached --name-only --diff-filter=ACMR -z)
+
+if (( ${#STAGED_FILES[@]} == 0 )); then
+  exit 0
+fi
+
+exec bash scripts/run-pre-commit.sh run --hook-stage pre-commit --files "${STAGED_FILES[@]}"

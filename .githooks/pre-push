@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+if [[ -n "${ALLOW_PROTECTED_BRANCH_PUSH:-}" ]]; then
+  exit 0
+fi
+
+while IFS=' ' read -r _local_ref _local_sha remote_ref _remote_sha; do
+  [[ -z "${remote_ref:-}" ]] && continue
+
+  case "$remote_ref" in
+    refs/heads/main|refs/heads/staging|refs/heads/local)
+      printf 'Direct pushes to %s are blocked. Open a pull request instead.\n' "${remote_ref#refs/heads/}" >&2
+      echo "Set ALLOW_PROTECTED_BRANCH_PUSH=1 to bypass intentionally." >&2
+      exit 1
+      ;;
+  esac
+done <<< "$INPUT"

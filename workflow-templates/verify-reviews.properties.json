@@ -1,6 +1,0 @@
-{
-  "name": "Verify Reviews",
-  "description": "Required by org rulesets for project repos. NOT for infra repos (pai-org-infra, simplemeter-infra, pai-terraform-modules, pai-infra-instructions).",
-  "iconName": "shield-check",
-  "categories": ["continuous-integration"]
-}
